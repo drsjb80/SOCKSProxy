@@ -1,0 +1,22 @@
+#! /usr/bin/awk -f
+
+$0 ~ ">"NAME {
+    start=1;
+    sub(/.*<A[^>]*>/, "");
+    sub(/<\/A>.*/, "");
+    print "<tr><th align=left>" $0 "</th>";
+    print "<td>";
+    next;
+}
+
+start && /\/TR/ {
+    print "</td></tr>";
+    start=0;
+}
+
+start {
+    gsub(/<[^>]*>/, "");
+    print $0
+}
+
+{ }

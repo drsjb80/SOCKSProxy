@@ -1,0 +1,5 @@
+ncftpput upload.sourceforge.net incoming JavaLN-*.jar
+
+scp index.html drb80@shell.sourceforge.net:/home/groups/j/ja/javaln/htdocs
+
+ssh drb80@shell.sourceforge.net "chmod go+r /home/groups/j/ja/javaln/htdocs/*"
