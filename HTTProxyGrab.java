@@ -338,7 +338,7 @@ class Communicate extends Thread
 
         // String total = host + "/" + port + sep + path + def;
 
-        String total = host + "/" + sep + path + def;
+        String total = host + sep + path + def;
 
         logger.info ("Saving " + total);
 
