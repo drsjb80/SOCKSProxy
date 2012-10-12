@@ -12,11 +12,12 @@ class Communicate extends Thread
     private JavaLN logger;
     private Socket socket;  // the client socket
     private String host;    // the host to connect to
+    private String path;    // the host to connect to
+    private int reply;    // the host to connect to
     private int port = -1;  // the port on that host
-    private String path;
-    private URL url;
-    private final int BUFFERSIZE = 10000;
-    private byte buffer[] = new byte[BUFFERSIZE];
+    private boolean onedotone = false;
+    private boolean keepAlive = false;
+    private boolean head = false;
 
     public Communicate (Socket socket, JavaLN logger)
     {
@@ -101,13 +102,19 @@ class Communicate extends Thread
         } 
     }
 
-    private void getGETorPOST (String s)
+
+    private String firstLine (String s)
     {
         logger.entering (s);
 
-        if (s.startsWith ("GET") || s.startsWith ("POST"))
+        head = s.toUpperCase().startsWith ("HEAD");
+
+        if (s.toUpperCase().startsWith ("GET") ||
+            s.toUpperCase().startsWith ("POST"))
         {
             String a[] = s.split (" ");
+
+            URL url = null;
 
             try
             {
@@ -116,24 +123,42 @@ class Communicate extends Thread
             catch (MalformedURLException MUE)
             {
                 logger.warning (MUE);
-                return;
+                return (s);
             }
 
             host = url.getHost();
             port = url.getPort();
-            path = url.getPath();
+
+            path = host + url.getPath() +
+                (url.getQuery() == null ? "" : "?" + url.getQuery()) +
+                (url.getRef() == null ? "" : url.getRef());
 
             if (port == -1)
                 port = 80;
+
+            logger.finer (host);
+            logger.finer (port);
+
+            onedotone = a[2].endsWith ("1.1");
+            logger.finer (onedotone);
+
+            s = s.replaceFirst ("http://[^/]*", "");
+        }
+        else if (s.toUpperCase().startsWith ("HTTP"))
+        {
+            logger.entering (s);
+            
+            String a[] = s.split (" ");
+
+            reply = Integer.parseInt (a[1]);
         }
         else
         {
-            logger.severe ("Error: no GET or POST found");
+            logger.severe ("Error: no GET, POST, or HTTP found");
         }
 
-        logger.exiting (host);
-        logger.exiting (port);
-        logger.exiting (path);
+        logger.exiting (s);
+        return (s);
     }
 
     /*
@@ -155,16 +180,12 @@ class Communicate extends Thread
             return (null);
         }
 
+        s = firstLine (s);
+
         while (! s.equals (""))
         {
-            logger.finest (s);
-
-            if (! s.startsWith ("Proxy-") ||
-                ! s.startsWith ("Connection: keep-alive"))
-            {
-                ret.add (s);
-            }
-
+            logger.finer (s);
+            ret.add (s);
             s = readLine (BIS);
         }
 
@@ -178,7 +199,7 @@ class Communicate extends Thread
     {
         for (int i = 0; i < array.length; i++)
         {
-            if (array[i].startsWith (match))
+            if (array[i].toUpperCase().startsWith (match.toUpperCase()))
                 return (array[i]);
         }
 
@@ -207,31 +228,81 @@ class Communicate extends Thread
     ** read from a stream and write to both the other end, and a file.
     ** read only up a a specific length, if specified
     */
-    private int readAndWrite (BufferedInputStream BIS,
+    private void readAndWrite (BufferedInputStream BIS,
         BufferedOutputStream BOS, FileOutputStream FOS, int len)
-        throws IOException
     {
         logger.entering (len);
 
-        int read = BIS.read (buffer, 0, len);
+        byte buffer[] = null;
 
-        if (read == -1)
+        if (len == -1)
         {
-            logger.exiting (read);
-            return (read);
+            buffer = new byte[8192];
+        }
+        else 
+        {
+            buffer = new byte[len];
         }
 
-        BOS.write (buffer, 0, read);
-        BOS.flush();
+        int read = -1;
 
-        if (FOS != null)
+        for (;;)
         {
-            FOS.write (buffer, 0, read);
-            FOS.flush();
-        }
+            try
+            {
+                logger.finer ("len = " + len);
+                read = BIS.read (buffer, 0, len);
+                logger.finer ("read = " + read);
+            }
+            catch (IOException IOE)
+            {
+                logger.warning (IOE);
+            }
 
-        logger.exiting (read);
-        return (read);
+            if (read == -1)
+            {
+                logger.exiting();
+                return;
+            }
+
+            /*
+            ** write whatever we got to the file and output stream
+            */
+            if (FOS != null)
+            {
+                try
+                {
+                    FOS.write (buffer, 0, read);
+                    FOS.flush();
+                }
+                catch (IOException IOE)
+                {
+                    logger.warning (IOE);
+                }
+            }
+
+            try
+            {
+                BOS.write (buffer, 0, read);
+                BOS.flush();
+            }
+            catch (IOException IOE)
+            {
+                logger.warning (IOE);
+            }
+
+            /*
+            ** if we didn't know how many to read, continue
+            ** reading.
+            */
+            if (len == -1)
+                continue;
+
+            len -= read;
+
+            if (len == 0)
+                break;
+        }
     }
 
     /*
@@ -250,11 +321,15 @@ class Communicate extends Thread
         FileOutputStream FOS)
         throws IOException
     {
-        logger.severe ("CHUNKED");
+        logger.entering();
 
         for (;;)
         {
             String hex = readLine (BIS);
+
+            if (hex == "")
+                break;
+
             int count = Integer.parseInt (hex, 16);
 
             logger.finer (hex);
@@ -263,93 +338,40 @@ class Communicate extends Thread
             if (count == 0)
                 break;
 
-            int read = readAndWrite (BIS, BOS, FOS, count);
-            
-            if (read != count)
-            {
-                logger.severe (read + " != " + count);
-                break;
-            }
-
-            if (read == -1)
-            {
-                logger.severe ("read == -1");
-                break;
-            }
+            readAndWrite (BIS, BOS, FOS, count);
         }
+        logger.exiting();
     }
 
     private void copyRaw (BufferedInputStream BIS, BufferedOutputStream BOS,
-        FileOutputStream FOS, String[] headerFields)
+        FileOutputStream FOS, int contentLength)
         throws IOException
     {
         logger.entering();
 
-        int contentLength = getContentLength (headerFields);
-        int remaining = contentLength;
-        int len = BUFFERSIZE;
+        readAndWrite (BIS, BOS, FOS, contentLength);
 
-        for (;;)
-        {
-            logger.finest (remaining);
-
-            // if there was a contentlength and it's smaller than the
-            // buffer size, just set the length to that.
-            if (contentLength != -1 && remaining < BUFFERSIZE)
-                len = remaining;
-
-            logger.finest (len);
-
-            int read = readAndWrite (BIS, BOS, FOS, len);
-
-            if (contentLength != -1)
-            {
-                if (read == -1)
-                {
-                    logger.severe ("read == -1");
-                    break;
-                }
-
-                remaining -= read;
-                logger.finest (remaining);
-
-                if (remaining <= 0)
-                    break;
-            }
-            else
-            {
-                if (read == -1)
-                    break;
-            }
-        }
+        logger.exiting();
     }
 
     /*
     ** copy the contents of BIS to BOS and a file stream created here.
     */
     private void copy (BufferedInputStream BIS, BufferedOutputStream BOS,
-        String headerFields[], boolean chunked) throws IOException
+        int contentLength, boolean chunked) throws IOException
     {
         logger.entering();
 
-        String path = url.getPath();
-        String sep = path.startsWith ("/") ? "" : "/";
-        String def = path.endsWith ("/") ? "index.html" : "";
+        logger.info (Thread.currentThread() + " saving " + path);
 
-        // String total = host + "/" + port + sep + path + def;
-
-        String total = host + sep + path + def;
-
-        logger.info ("Saving " + total);
-
-        File f = new File (total);
+        File f = new File (path);
         File g = new File (f.getParent());
         g.mkdirs();
 
         FileOutputStream FOS = null;
         try
         {
-            FOS = new FileOutputStream (total, false);
+            FOS = new FileOutputStream (path, false);
         }
         catch (FileNotFoundException FNFE)
         {
@@ -360,10 +382,12 @@ class Communicate extends Thread
         if (chunked)
             copyChunked (BIS, BOS, FOS);
         else
-            copyRaw (BIS, BOS, FOS, headerFields);
+            copyRaw (BIS, BOS, FOS, contentLength);
 
         if (FOS != null)
             FOS.close();
+
+        logger.exiting();
     }
 
     /*
@@ -388,65 +412,157 @@ class Communicate extends Thread
 
     public void run()
     {
+        logger.info ("Starting " + Thread.currentThread());
+
         String headerFields[] = null;
+
+        BufferedInputStream localBIS = null;
+        BufferedOutputStream localBOS = null;
+
+        Socket remoteSocket = null;
+        BufferedInputStream remoteBIS = null;
+        BufferedOutputStream remoteBOS = null;
+
         try
         {
-            BufferedInputStream localBIS = new BufferedInputStream
-                (socket.getInputStream());
-            BufferedOutputStream localBOS = new BufferedOutputStream
-                (socket.getOutputStream());
+            localBIS = new BufferedInputStream (socket.getInputStream());
+            localBOS = new BufferedOutputStream (socket.getOutputStream());
 
-            headerFields = getHeaderFields (localBIS);
-
-            if (headerFields == null)
+            for (;;)
             {
-                logger.warning ("null headerfields");
-                return;
-            }
+                headerFields = getHeaderFields (localBIS);
 
-            getGETorPOST (headerFields[0]);
-            getHostAndPort (headerFields);
+                if (headerFields == null)
+                {
+                    logger.finer ("done");
+                    break;
+                }
 
-            boolean chunked =
-                getMatch (headerFields, "Transfer-Encoding: chunked") != null;
+                getHostAndPort (headerFields);
 
-            if (host != null)
-            {
-                Socket remoteSocket = new Socket (host, port);
-                BufferedInputStream remoteBIS = new BufferedInputStream
-                    (remoteSocket.getInputStream());
-                BufferedOutputStream remoteBOS = new BufferedOutputStream
-                    (remoteSocket.getOutputStream());
+                logger.info ("requesting " + path);
 
-                // send the local headers to the remote server
+                boolean close = getMatch
+                    (headerFields, "Connection: close") != null;
+                logger.finer (close);
+
+                boolean keepAlive = getMatch
+                    (headerFields, "Connection: Keep-Alive") != null;
+                logger.finer (keepAlive);
+
+                /*
+                ** open remote, if not already done by persistent connection
+                */
+                if (remoteSocket == null)
+                {
+                    logger.fine ("opening new socket");
+
+                    remoteSocket = new Socket (host, port);
+                    remoteBIS = new BufferedInputStream
+                        (remoteSocket.getInputStream());
+                    remoteBOS = new BufferedOutputStream
+                        (remoteSocket.getOutputStream());
+                }
+
+                /*
+                ** write the local header to the remote server
+                */
                 for (int i = 0; i < headerFields.length; i++)
                     writeLine (headerFields[i], remoteBOS);
 
                 writeLine ("", remoteBOS);
 
-                // write the remote server's headers to the local client
+                /*
+                ** write the remote server's headers to the local client
+                */
                 headerFields = getHeaderFields (remoteBIS);
+
+                if (headerFields == null)
+                {
+                    logger.finer ("done");
+                    break;
+                }
 
                 for (int i = 0; i < headerFields.length; i++)
                     writeLine (headerFields[i], localBOS);
 
                 writeLine ("", localBOS);
 
-                copy (remoteBIS, localBOS, headerFields, chunked);
+                boolean chunked = getMatch
+                    (headerFields, "Transfer-Encoding: chunked") != null;
+                logger.finer (chunked);
 
-                localBIS.close();
-                localBOS.close();
-                socket.close();
-                remoteBIS.close();
-                remoteBOS.close();
-                remoteSocket.close();
+                int contentLength = getContentLength (headerFields);
+
+                if (reply == 404)
+                    logger.severe ("404 for " + path);
+
+                logger.info ("reply " + reply);
+                logger.info ("contentLength " + contentLength);
+
+                if ((keepAlive || onedotone) && contentLength < 0)
+                {
+                    logger.severe ("contentLength not specified");
+                    copy (remoteBIS, localBOS, contentLength, chunked);
+                }
+                else if (contentLength > 0 || chunked)
+                {
+                    copy (remoteBIS, localBOS, contentLength, chunked);
+                }
+                else if (head)
+                {
+                    // nothing to copy
+                }
+                else if (reply >= 100 && reply <= 199)
+                {
+                    // nothing to copy
+                }
+                else if (reply == 204 || reply == 304)
+                {
+                    // nothing to copy
+                }
+                else if (close)
+                {
+                    copy (remoteBIS, localBOS, contentLength, chunked);
+                }
+
+                if (close)
+                {
+                    logger.finer ("closing");
+                    break;
+                }
+
+                if (onedotone || keepAlive)
+                {
+                    logger.finer ("persistent");
+                    continue;
+                }
+
+                logger.severe ("continuing anyway");
             }
         }
         catch (IOException IOE)
         {
             logger.warning (IOE);
-            logger.warning ("url = " + url);
+            logger.warning ("path = " + path);
         }
+
+        try
+        {
+            localBIS.close();
+            localBOS.close();
+            socket.close();
+            remoteBIS.close();
+            remoteBOS.close();
+            remoteSocket.close();
+        }
+        catch (IOException IOE)
+        {
+            logger.warning (IOE);
+            logger.warning ("path = " + path);
+        }
+
+        logger.info ("Ending " + Thread.currentThread());
     }
 }
 
@@ -458,14 +574,23 @@ public class HTTProxyGrab
     {
         ServerSocket serverSocket = new ServerSocket (Integer.decode (args[0]));
 
-        ConsoleHandler CH = new ConsoleHandler();
-        CH.setFormatter (new LineNumberFormatter());
-        // CH.setLevel (Level.FINER);
+        /*
+        ConsoleHandler CH0 = new ConsoleHandler();
+        CH0.setFormatter (new NullFormatter());
+        CH0.setLevel (Level.INFO);
+        CH0.setFilter (new LevelFilter (Level.INFO));
+        logger.addHandler (CH0);
+        */
 
-        logger.addHandler (CH);
+        ConsoleHandler CH1 = new ConsoleHandler();
+        CH1.setFormatter (new LineNumberFormatter());
+        CH1.setLevel (Level.FINER);
+        // CH1.setLevel (Level.WARNING);
+        // CH1.setFilter (new LevelFilter (Level.WARNING));
+        logger.addHandler (CH1);
+
         logger.setUseParentHandlers (false);
-        // logger.setLevel (Level.FINEST);
-        logger.finer ("Starting " + Thread.currentThread());
+        logger.setLevel (Level.FINEST);
 
         for (;;)
         {
